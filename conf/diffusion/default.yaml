@@ -1,0 +1,67 @@
+model:
+  checkpoints_prefix: "diffusion"
+  num_workers: 30
+  load_checkpoint: True
+
+training:
+  training_iters: 500000
+  batch_size: 512
+  batch_size_per_gpu: 512
+
+generation:
+  num_gen_texts: 2000
+  texts_dir_path: "generated_texts"
+  metrics_dir_path: "metrics"
+  num_texts_from_metric: 1000
+  train_unique_four_grams: "${dataset.dataset_path}/train_unique_four_grams.pkl"
+
+diffusion:
+  T: 1.
+  eps: 1e-5
+  use_self_cond: true
+  t_min: 0.05
+  is_conditional: false
+
+ema:
+  decay: 0.9999
+
+dynamic:
+  N: 200
+  scheduler: tanh
+  d: 5
+  solver: euler
+  ode_sampling: false
+
+params:
+  score_estimator: 0
+
+all_params: dict()
+
+logging:
+  log_freq: 10
+  eval_freq: 100000
+  save_freq: 100000
+
+architecture:
+  unconditional_encoder:
+    hidden_size: 768
+    intermediate_size: 3072
+    num_hidden_layers: 12
+    num_attention_heads: 12
+    attention_head_size: 64
+    attention_probs_dropout_prob: 0.
+    layer_norm_eps: 1e-5
+    rope_theta: 10000.0
+    max_position_embeddings: 512
+    embedding_dim: 768
+
+  time_embedding:
+    max_period: 10
+
+  conditional_encoder:
+    hidden_size: 768
+    num_hidden_layers: 12
+    num_attention_heads: 12
+    max_position_embeddings: 512
+  
+

@@ -1,0 +1,6 @@
+add_special_tokens: true
+padding: true
+truncation: true
+return_tensors: "pt"
+return_attention_mask: true
+return_token_type_ids: false

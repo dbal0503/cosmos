@@ -1,0 +1,9 @@
+name: adamw
+learning_rate: 2e-4
+warmup_lr: 1e-8
+min_lr: 1e-4
+weight_decay: 0.00001
+eps: 1e-6
+betas: [0.9, 0.98]
+linear_warmup: 1000
+grad_clip_norm: 10.0

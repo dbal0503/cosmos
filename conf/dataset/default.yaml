@@ -1,0 +1,6 @@
+name: "wikipedia-bloom"
+base_path: "${project.path}/data"
+max_sequence_len: 128
+max_context_len: 128
+swap_cfg_coef: 0.0
+conditional: false

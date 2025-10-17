@@ -1,0 +1,7 @@
+name: "openwebtext-512"
+dataset_path: "${project.path}/data/${.name}"
+max_sequence_len: 512
+swap_cfg_coef: 0.
+prefetch_shards: 2
+
+metrics: [mauve, ppl, div]

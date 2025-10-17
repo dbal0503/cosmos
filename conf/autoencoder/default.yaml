@@ -1,0 +1,28 @@
+model:
+  checkpoints_prefix: "autoencoder"
+  text_encoder: "bert-base-cased"
+  text_encoder_freeze_params: true
+  num_workers: 10
+  load_checkpoint: True
+
+training:
+  training_iters: 200000
+  batch_size: 512
+  batch_size_per_gpu: 512
+  
+params:
+  text_encoder: 0
+  encoder: 0
+  decoder: 0
+  total: 0
+
+all_params: dict()
+
+logging:
+  log_freq: 10
+  eval_freq: 20000
+  save_freq: 20000
+
+latent:
+  dim: 768
+  num_latents: 128
