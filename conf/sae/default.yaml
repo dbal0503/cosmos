@@ -1,0 +1,19 @@
+model:
+  type: "topk"  # "topk" or "dense"
+  d_input: 768
+  expansion_factor: 4
+  k: 64
+  checkpoint_path: ""
+
+training:
+  learning_rate: 3e-4
+  weight_decay: 0.0
+  batch_size: 4096
+  num_steps: 50000
+  checkpoint_every: 2000
+  log_every: 100
+  eval_every: 1000
+
+data:
+  latents_dir: "cached_latents"
+  split: "train"

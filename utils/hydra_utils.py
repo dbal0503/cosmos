@@ -1,23 +1,26 @@
-from hydra import compose, core, initialize
+from hydra import compose, initialize_config_dir
 from hydra.core.global_hydra import GlobalHydra
-import hydra
+from omegaconf import OmegaConf
 import sys
 import os
 
+
 def setup_config(config_path):
-    # Reset Hydra to avoid conflicts if already initialized
+    """Load config from a relative config path."""
     GlobalHydra.instance().clear()
-    # Initialize Hydra and load config manually
-    initialize(config_path=config_path, version_base=None)  # Set path to your configs
-    # Load the configuration
+    initialize_config_dir(config_dir=os.path.abspath(config_path), version_base=None)
     cfg = compose(config_name="config")
     return cfg
 
 
 def load_config(project_root, config_dir_path):
+    """Load config from an absolute config directory path."""
     sys.path.append(project_root)
     os.environ["PROJECT_ROOT"] = project_root
     GlobalHydra.instance().clear()
-    hydra.initialize(config_path=config_dir_path, version_base=None)  # Set path to your configs
-    cfg = hydra.compose(config_name="config")  # Replace with your main config file
+    abs_config_dir = os.path.abspath(config_dir_path)
+    initialize_config_dir(config_dir=abs_config_dir, version_base=None)
+    cfg = compose(config_name="config")
+    # Allow post-hoc attribute mutation
+    OmegaConf.set_struct(cfg, False)
     return cfg

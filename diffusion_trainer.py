@@ -22,6 +22,7 @@ from functools import partial
 
 from encoder_trainer import EncoderTrainer
 from architecture.score_estimator import ScoreEstimator
+from architecture.sparse_autoencoder import TopKSparseAutoencoder, DenseAutoencoder
 from estimation.metrics import compute_metric
 from diffusion_utils.dynamic import DynamicSDE
 from diffusion_utils.solvers import create_solver
@@ -33,6 +34,20 @@ from estimation.fid import calculate_fid_for_embs
 from estimation.util import truncate_text
 from utils.pylogger import RankedLogger
 from utils.sharded_dataset import ShardedDataset
+
+
+def _get_world_size():
+    """Get world size, returning 1 if DDP is not initialized."""
+    if dist.is_initialized():
+        return dist.get_world_size()
+    return 1
+
+
+def _get_rank():
+    """Get rank, returning 0 if DDP is not initialized."""
+    if dist.is_initialized():
+        return dist.get_rank()
+    return 0
 
 
 class DiffusionTrainer:
@@ -69,6 +84,14 @@ class DiffusionTrainer:
         # Setup EMA
         self.ema = ExponentialMovingAverage(self.score_estimator.parameters(), decay=self.cfg.diffusion.ema.decay)
 
+        # Setup SAE (optional, loaded externally via load_sae())
+        self.sae = None
+        self.use_sae_inference = False   # Apply SAE as post-processing filter at inference
+        self.use_sae_training = False    # Apply SAE to training targets (Scenario C)
+
+        # Default: ddp_score_estimator = unwrapped model (overridden by _setup_ddp)
+        self.ddp_score_estimator = self.score_estimator
+
         if self.cfg.training == "diffusion":
             # Initialize training components
             self._setup_optimizer()
@@ -83,13 +106,47 @@ class DiffusionTrainer:
             # Log parameter counts
             self._log_parameter_counts()
             
-            self.device = torch.device(f"cuda:{self.cfg.ddp.local_rank}")
-            if dist.is_initialized() and dist.get_rank() == 0:
+            if _get_rank() == 0:
                 config_to_wandb(self.cfg)
-            
-            if is_loaded and dist.is_initialized() and self.cfg.ddp.enabled:
+
+            if is_loaded and self.cfg.ddp.enabled and dist.is_initialized():
                 self.estimate()
                 self.validate()
+
+    def load_sae(self, checkpoint_path: str, sae_type: str = "topk",
+                 d_input: int = 768, expansion_factor: int = 4, k: int = 64,
+                 use_at_inference: bool = True, use_at_training: bool = False):
+        """
+        Load a trained SAE and configure how it's used.
+
+        Args:
+            checkpoint_path: Path to SAE checkpoint .pt file
+            sae_type: "topk" or "dense"
+            d_input: Input dimension (should match latent dim)
+            expansion_factor: SAE expansion factor
+            k: TopK sparsity parameter (ignored for dense)
+            use_at_inference: Apply SAE as post-processing filter on generated latents
+            use_at_training: Apply SAE to clean training targets (Scenario C fine-tuning)
+        """
+        if sae_type == "topk":
+            self.sae = TopKSparseAutoencoder(d_input=d_input, expansion_factor=expansion_factor, k=k)
+        elif sae_type == "dense":
+            self.sae = DenseAutoencoder(d_input=d_input, expansion_factor=expansion_factor)
+        else:
+            raise ValueError(f"Unknown SAE type: {sae_type}")
+
+        state_dict = torch.load(checkpoint_path, map_location="cpu")
+        if "sae_state_dict" in state_dict:
+            self.sae.load_state_dict(state_dict["sae_state_dict"])
+        else:
+            self.sae.load_state_dict(state_dict)
+        self.sae.to(self.device)
+        self.sae.eval()
+
+        self.use_sae_inference = use_at_inference
+        self.use_sae_training = use_at_training
+        self.logger.info(f"SAE loaded from {checkpoint_path} "
+                        f"(inference={use_at_inference}, training={use_at_training})")
 
     def _setup_ddp(self):
         """Setup Distributed Data Parallel."""
@@ -136,28 +193,6 @@ class DiffusionTrainer:
             warmup_t=self.cfg.diffusion.optimizer.linear_warmup,
             cycle_limit=1,
             t_in_epochs=False,
-        )
-
-    def _setup_train_data_generator(self) -> None:
-        if hasattr(self, 'train_dataset'):
-            del self.train_dataset
-
-        if not hasattr(self, 'train_datasets_iter'):
-            self.train_datasets_iter = DatasetDDP(
-                config=self.cfg,
-                split="train",
-            ).get_dataset_iter()
-
-        self.train_dataset = next(self.train_datasets_iter)
-        self.logger.info(f"Dataset length: {len(self.train_dataset)}")
-
-        self.train_loader = DataLoader(
-            self.train_dataset,
-            num_workers=self.cfg.diffusion.model.num_workers,
-            batch_size=self.cfg.diffusion.training.batch_size_per_gpu,
-            shuffle=True,
-            collate_fn=self.collate_fn,
-            drop_last=True,
         )
 
     def _setup_train_data_generator(self):
@@ -314,7 +349,7 @@ class DiffusionTrainer:
         return checkpoint_name
         
     def save_checkpoint(self) -> None:
-        if self.cfg.ddp.enabled and dist.get_rank() != 0:
+        if self.cfg.ddp.enabled and _get_rank() != 0:
             return
 
         if not os.path.exists(self.cfg.project.checkpoint_dir):
@@ -463,14 +498,14 @@ class DiffusionTrainer:
             stat_dict = self.optimizer_step(total_loss)
 
             if self.step % self.cfg.diffusion.logging.log_freq == 0:
-                if dist.is_initialized() and dist.get_rank() == 0:
-                    self.log_data(total_loss, loss_dict, stat_dict, is_train=True)   
-            
+                if _get_rank() == 0:
+                    self.log_data(total_loss, loss_dict, stat_dict, is_train=True)
+
             self.train_range.set_description(f"total_loss: {total_loss.item():0.3f}")
-            
+
             if self.step % self.cfg.diffusion.logging.save_freq == 0:
                 self.save_checkpoint()
-                
+
             if self.step % self.cfg.diffusion.logging.eval_freq == 0:
                 self.validate()
                 self.estimate()
@@ -478,7 +513,7 @@ class DiffusionTrainer:
 
         self.save_checkpoint()
 
-        if dist.is_initialized() and dist.get_rank() == 0:
+        if _get_rank() == 0 and wandb.run is not None:
             wandb.finish()
 
     @torch.no_grad()
@@ -518,6 +553,13 @@ class DiffusionTrainer:
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16), torch.no_grad():
             encoder_latents, _ = self.autoencoder.get_latent(batch, bert_output_masking=False)
             clean_x = self.autoencoder.normalize_latent(encoder_latents)
+
+        # SAE training-time target filtering (Scenario C): diffusion learns
+        # to predict SAE-reconstructed latents instead of raw encoder latents
+        if self.sae is not None and self.use_sae_training:
+            with torch.no_grad():
+                z_hat, _, _ = self.sae(clean_x)
+                clean_x = z_hat
 
         # Add noise to the clean latent
         batch_size = clean_x.size(0)
@@ -598,6 +640,12 @@ class DiffusionTrainer:
     @torch.no_grad()
     def generate_text_batch(self, batch_size):
         pred_embeddings = self.pred_embeddings(batch_size=batch_size)
+
+        # SAE inference-time filter (Scenario A): project diffusion output
+        # through SAE to "clean up" latents before decoding
+        if self.sae is not None and self.use_sae_inference:
+            z_hat, _, _ = self.sae(pred_embeddings)
+            pred_embeddings = z_hat
 
         with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
             pred_latents = self.autoencoder.denormalize_latent(pred_embeddings)
@@ -739,26 +787,30 @@ class DiffusionTrainer:
         mauve_values = []
         size = self.cfg.diffusion.generation.num_texts_from_metric
         total_number = len(predictions) // size
+        world_size = _get_world_size()
+        rank = _get_rank()
+
         for ind_gen in range(total_number):
             for ind_trg in range(total_number):
                 ind = ind_gen * total_number + ind_trg
-                if ind % dist.get_world_size() == dist.get_rank():
+                if ind % world_size == rank:
                     mauve_values.append(
                         compute_metric(
-                            "mauve", 
-                            predictions=predictions[ind_gen * size:(ind_gen + 1) * size], 
+                            "mauve",
+                            predictions=predictions[ind_gen * size:(ind_gen + 1) * size],
                             references=references[ind_trg * size:(ind_trg + 1) * size]
                         )
                     )
-        
-        mauve_values = gather_texts(mauve_values)
 
-        if dist.get_rank() == 0:
+        if self.cfg.ddp.enabled:
+            mauve_values = gather_texts(mauve_values)
+
+        if rank == 0:
             mauve_values = np.array(mauve_values)
             mauve_value = np.mean(mauve_values)
             self.logger.info(f"Mauve: {mauve_value:0.5f}")
             self.log_metric(metric_name=f"{self.cfg.dataset.name}", loader_name="Mauve", value=mauve_value)
-        
+
             return mauve_value
         else:
             return None
@@ -769,24 +821,28 @@ class DiffusionTrainer:
         ppl_values = []
         size = self.cfg.diffusion.generation.num_texts_from_metric
         total_number = len(predictions) // size
+        world_size = _get_world_size()
+        rank = _get_rank()
+
         for ind_gen in range(total_number):
-            if ind_gen % dist.get_world_size() == dist.get_rank():
+            if ind_gen % world_size == rank:
                 ppl_values.append(
                     compute_metric(
-                        "ppl", 
-                        predictions=predictions[ind_gen * size:(ind_gen + 1) * size], 
+                        "ppl",
+                        predictions=predictions[ind_gen * size:(ind_gen + 1) * size],
                         references=None,
                     )
                 )
-        
-        ppl_values = gather_texts(ppl_values)
 
-        if dist.get_rank() == 0:
+        if self.cfg.ddp.enabled:
+            ppl_values = gather_texts(ppl_values)
+
+        if rank == 0:
             ppl_values = np.array(ppl_values)
             ppl_value = np.mean(ppl_values)
             self.logger.info(f"PPL: {ppl_value:0.5f}")
             self.log_metric(metric_name=f"{self.cfg.dataset.name}", loader_name="PPL", value=ppl_value)
-           
+
             return ppl_value
         else:
             return None
@@ -797,19 +853,23 @@ class DiffusionTrainer:
         div_values = []
         size = self.cfg.diffusion.generation.num_texts_from_metric
         total_number = len(predictions) // size
+        world_size = _get_world_size()
+        rank = _get_rank()
+
         for ind_gen in range(total_number):
-            if ind_gen % dist.get_world_size() == dist.get_rank():
+            if ind_gen % world_size == rank:
                 div_values.append(
                     compute_metric(
-                        "div", 
-                        predictions=predictions[ind_gen * size:(ind_gen + 1) * size], 
+                        "div",
+                        predictions=predictions[ind_gen * size:(ind_gen + 1) * size],
                         references=None,
                     )
                 )
-        
-        div_values = gather_texts(div_values)
 
-        if dist.get_rank() == 0:
+        if self.cfg.ddp.enabled:
+            div_values = gather_texts(div_values)
+
+        if rank == 0:
             div_values = np.array(div_values)
             div_value = np.mean(div_values)
             self.logger.info(f"DIV: {div_value:0.5f}")
@@ -820,7 +880,7 @@ class DiffusionTrainer:
             return None
 
     def _compute_fid(self, pred_embeddings, trg_embeddings):
-        if dist.get_rank() == 0:
+        if _get_rank() == 0:
             pred_embeddings = np.mean(np.array(pred_embeddings), axis=1)
             trg_embeddings = np.mean(np.array(trg_embeddings), axis=1)
 
@@ -834,24 +894,28 @@ class DiffusionTrainer:
 
     def _compute_mem(self, predictions):
         predictions = truncate_text(predictions, self.cfg.dataset.max_sequence_len, 1)
-        
+
         mem_values = []
         size = self.cfg.diffusion.generation.num_texts_from_metric
         total_number = len(predictions) // size
+        world_size = _get_world_size()
+        rank = _get_rank()
+
         for ind_gen in range(total_number):
-            if ind_gen % dist.get_world_size() == dist.get_rank():
+            if ind_gen % world_size == rank:
                 mem_values.append(
                     compute_metric(
-                        "mem", 
-                        predictions=predictions[ind_gen * size:(ind_gen + 1) * size], 
+                        "mem",
+                        predictions=predictions[ind_gen * size:(ind_gen + 1) * size],
                         train_unique_four_grams=self.cfg.diffusion.generation.train_unique_four_grams,
                         train_dataset_path=f"{self.cfg.dataset.dataset_path}/train",
                     )
                 )
-        
-        mem_values = gather_texts(mem_values)
 
-        if dist.get_rank() == 0:
+        if self.cfg.ddp.enabled:
+            mem_values = gather_texts(mem_values)
+
+        if rank == 0:
             mem_values = np.array(mem_values)
             mem_value = np.mean(mem_values)
             self.logger.info(f"MEM: {mem_value:0.5f}")
