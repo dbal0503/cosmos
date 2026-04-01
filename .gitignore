@@ -143,4 +143,4 @@ generated_seqs
 data
 wandb
 generated_texts
-config.yaml
+/config.yaml

@@ -1,0 +1,33 @@
+defaults:
+  - encoder: default
+  - decoder: default
+  - autoencoder: default
+  - diffusion: default
+  - dataset: default
+  - tokenizer: default
+  - sae: default
+  - autoencoder/optimizer: adamw
+  - diffusion/optimizer: adamw
+  - _self_
+
+hydra:
+  run:
+    dir: .
+  sweep:
+    dir: .
+
+project:
+  path: .
+  name: "cosmos"
+  seed: 42
+  checkpoint_dir: "checkpoints"
+  wandb_logging: false
+  tags: []
+
+ddp:
+  enabled: true
+  local_rank: 0
+  global_rank: 0
+
+training: ""
+suffix: ""
