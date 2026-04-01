@@ -191,7 +191,7 @@ def train(args):
                 idx = torch.randperm(val_flat.shape[0])[:n_val]
                 val_batch = val_flat[idx].to(device)
 
-                val_loss, val_info = sae.compute_loss(val_batch)
+                val_loss, val_info, _ = sae.compute_loss(val_batch)
                 val_losses.append(val_info["mse"])
                 val_fvus.append(val_info["fvu"])
 
