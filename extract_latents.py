@@ -101,7 +101,7 @@ def main(cfg: DictConfig):
         chunk_idx = 0
         chunk_size = 10000  # Save in chunks to manage memory
 
-        while True:
+        for _shard_idx in range(sharded.num_shards):
             shard = sharded.get_next_shard()
             if shard is None:
                 break
