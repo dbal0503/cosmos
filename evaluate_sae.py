@@ -207,14 +207,17 @@ def main():
     # Build Hydra config programmatically
     from utils.hydra_utils import load_config
     project_root = os.path.dirname(os.path.abspath(__file__))
-    cfg = load_config(project_root, os.path.join(project_root, "conf"))
+    cfg = load_config(
+        project_root,
+        os.path.join(project_root, "conf"),
+        overrides=[f"dataset={args.dataset}"],
+    )
 
     # Override config values
     cfg.ddp.enabled = False
     cfg.ddp.local_rank = 0
     cfg.ddp.global_rank = 0
     cfg.training = ""
-    cfg.dataset.name = args.dataset
     cfg.encoder.latent.num_latents = args.num_latents
     cfg.encoder.embedding.max_position_embeddings = args.max_position_embeddings
     cfg.decoder.latent.num_latents = args.num_latents
