@@ -41,17 +41,42 @@ def filter_empty_texts(predictions, references):
 
 
 def compute_ppl(predictions, model_id='gpt2-large'):
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
     torch.cuda.empty_cache()
 
     predictions = [p for p in predictions if p]
 
-    perplexity = load("perplexity", module_type="metric", model_id=model_id)
-    ppl_list = perplexity.compute(
-        predictions=predictions, 
-        model_id=model_id, 
-        device='cuda', 
-        add_start_token=True,
-    )["perplexities"]
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+    model = AutoModelForCausalLM.from_pretrained(model_id).to(device)
+    model.eval()
+    tokenizer = AutoTokenizer.from_pretrained(model_id)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+
+    ppl_list = []
+    with torch.no_grad():
+        for text in predictions:
+            encodings = tokenizer(text, return_tensors='pt', truncation=True, max_length=1024)
+            input_ids = encodings['input_ids'].to(device)
+            if input_ids.size(1) < 2:
+                continue
+            # prepend bos token
+            bos_token_id = tokenizer.bos_token_id if tokenizer.bos_token_id is not None else tokenizer.eos_token_id
+            bos = torch.tensor([[bos_token_id]], device=device)
+            input_ids = torch.cat([bos, input_ids], dim=1)
+
+            target_ids = input_ids.clone()
+            # mask the bos token from loss
+            target_ids[:, 0] = -100
+
+            outputs = model(input_ids, labels=target_ids)
+            neg_log_likelihood = outputs.loss
+            ppl_list.append(torch.exp(neg_log_likelihood).item())
+
+    del model
+    torch.cuda.empty_cache()
+
     ppl_list = np.sort(ppl_list)
     quantile = 0.05
     a_min, a_max = int(quantile * len(ppl_list)), int((1 - quantile) * len(ppl_list))
