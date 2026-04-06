@@ -193,7 +193,7 @@ def main():
     parser.add_argument("--sae_type", type=str, default="topk")
     parser.add_argument("--expansion_factor", type=int, default=4)
     parser.add_argument("--k", type=int, default=64)
-    parser.add_argument("--num_texts", type=int, default=2000)
+    parser.add_argument("--num_texts", type=int, default=1000)
     parser.add_argument("--batch_size", type=int, default=64)
     parser.add_argument("--num_latents", type=int, default=16)
     parser.add_argument("--max_position_embeddings", type=int, default=128)

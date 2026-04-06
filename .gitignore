@@ -144,3 +144,4 @@ data
 wandb
 generated_texts
 /config.yaml
+/report
